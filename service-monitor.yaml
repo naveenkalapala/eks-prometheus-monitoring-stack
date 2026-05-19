@@ -1,0 +1,90 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: java-app-monitor
+  namespace: java
+  labels:
+    app: java-example
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: java-example
+  namespaceSelector:
+    matchNames:
+      - java
+  endpoints:
+    - port: http
+      path: /actuator/prometheus
+      interval: 30s
+      scrapeTimeout: 10s
+---
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: java-app-alerts
+  namespace: java
+  labels:
+    app: java-example
+    release: prometheus
+spec:
+  groups:
+    - name: java-app.rules
+      rules:
+        # Pod not ready for more than 5 minutes
+        - alert: JavaAppPodNotReady
+          expr: |
+            kube_pod_status_ready{namespace="java", condition="true"} == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Java app pod {{ $labels.pod }} not ready"
+            description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has been not ready for more than 5 minutes."
+
+        # High memory usage (>80%)
+        - alert: JavaAppHighMemoryUsage
+          expr: |
+            (container_memory_working_set_bytes{namespace="java", container="java-example"}
+            / container_spec_memory_limit_bytes{namespace="java", container="java-example"}) > 0.8
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Java app high memory usage"
+            description: "Container {{ $labels.container }} in pod {{ $labels.pod }} memory usage is above 80% (current: {{ $value | humanizePercentage }})."
+
+        # High CPU usage (>80%)
+        - alert: JavaAppHighCPUUsage
+          expr: |
+            (rate(container_cpu_usage_seconds_total{namespace="java", container="java-example"}[5m])
+            / container_spec_cpu_quota{namespace="java", container="java-example"}
+            * container_spec_cpu_period{namespace="java", container="java-example"}) > 0.8
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Java app high CPU usage"
+            description: "Container {{ $labels.container }} in pod {{ $labels.pod }} CPU usage is above 80%."
+
+        # Pod restarts
+        - alert: JavaAppPodRestarting
+          expr: |
+            increase(kube_pod_container_status_restarts_total{namespace="java"}[1h]) > 3
+          labels:
+            severity: critical
+          annotations:
+            summary: "Java app pod restarting frequently"
+            description: "Pod {{ $labels.pod }} has restarted {{ $value }} times in the last hour."
+
+        # No replicas available
+        - alert: JavaAppDown
+          expr: |
+            kube_deployment_status_replicas_available{namespace="java", deployment="java-example"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Java application is down"
+            description: "Deployment java-example has 0 available replicas."

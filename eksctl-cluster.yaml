@@ -1,0 +1,50 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: eks-java
+  region: us-east-1
+  version: "1.34"
+
+iam:
+  withOIDC: true                # Required for IRSA (EBS CSI, ALB Controller)
+
+vpc:
+  id: "vpc-xxxxx"               # Replace with your VPC ID
+  cidr: "10.0.0.0/16"           # Use /16 for production (not /26)
+  subnets:
+    public:
+      us-east-1a:
+        id: "subnet-xxxxx"      # Replace with your public subnet
+      us-east-1b:
+        id: "subnet-yyyyy"      # Replace with your public subnet
+
+managedNodeGroups:
+  - name: java-workers
+    instanceType: t3.medium       # Production minimum (17 pods/node, 4GB RAM)
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 4                    # Allow autoscaling headroom
+    volumeSize: 50                # Adequate for node-exporter, container layers, logs
+    volumeType: gp3
+    subnets:
+      - us-east-1a
+      - us-east-1b
+    labels:
+      role: java-worker                        # Must match nodeSelector/affinity in prometheus-values.yaml
+    tags:
+      environment: production
+      project: java-monitoring
+    iam:
+      withAddonPolicies:
+        albIngress: true
+        cloudWatch: true
+        ebs: true                              # Required for EBS CSI Driver IRSA
+
+addons:
+  - name: vpc-cni
+  - name: coredns
+  - name: kube-proxy
+  - name: metrics-server                        # Required for persistent storage (gp3 StorageClass)
+  - name: aws-ebs-csi-driver                    # Required for persistent storage (gp3 StorageClass)
+  - name: aws-load-balancer-controller          # Required for ALB Ingress (IRSA setup)

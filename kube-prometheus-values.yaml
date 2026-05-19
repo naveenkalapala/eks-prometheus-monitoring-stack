@@ -1,0 +1,324 @@
+fullnameOverride: prometheus     # Controls service names: prometheus-prometheus, prometheus-alertmanager, etc.
+namespaceOverride: java
+
+prometheusOperator:
+  enabled: true
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+  admissionWebhooks:
+    enabled: true
+    patch:
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          cpu: 50m
+          memory: 64Mi
+
+  # Node affinity
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: role
+                operator: In
+                values:
+                  - java-worker 
+
+
+prometheus:
+  enabled: true
+  prometheusSpec:
+    replicas: 1
+    retention: 14d             
+    retentionSize: "45GB"      
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: role
+                  operator: In
+                  values:
+                    - java-worker     
+
+    resources:
+      requests:
+        cpu: 50m
+        memory: 256Mi
+      limits:
+        cpu: 300m
+        memory: 512Mi
+
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp3        
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 50Gi           
+
+
+    routePrefix: /        
+
+    externalUrl: "http://prometheus.example.com"  
+    
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    serviceMonitorNamespaceSelector: {}
+    podMonitorNamespaceSelector: {}
+    ruleNamespaceSelector: {}
+    probeNamespaceSelector: {}
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      fsGroup: 2000
+
+  service:
+    type: ClusterIP
+    port: 9090
+
+grafana:
+  enabled: true
+  replicas: 1
+
+
+  admin:
+    existingSecret: grafana-admin-secret
+    userKey: admin-user
+    passwordKey: admin-password
+
+
+  defaultDashboardsEnabled: true    
+
+  resources:
+    requests:
+      cpu: 20m
+      memory: 96Mi
+    limits:
+      cpu: 150m
+      memory: 192Mi
+
+  persistence:
+    enabled: true
+    storageClassName: gp3
+    accessModes: ["ReadWriteOnce"]
+    size: 5Gi
+
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 2000
+
+  service:
+    type: ClusterIP
+    port: 80
+
+  # Node affinity 
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: role
+                operator: In
+                values:
+                  - java-worker 
+
+  sidecar:
+    dashboards:
+      enabled: true
+      searchNamespace: ALL
+    datasources:
+      enabled: true
+    resources:
+      requests:
+        cpu: 10m
+        memory: 48Mi
+      limits:
+        cpu: 50m
+        memory: 96Mi
+
+  # Default datasource
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+        - name: Prometheus
+          type: prometheus
+          url: http://prometheus-prometheus:9090
+          access: proxy
+          isDefault: true
+
+  grafana.ini:               # Custom Grafana configuration (e.g., disable login form, allow embedding)
+    server:
+      root_url: "%(protocol)s://%(domain)s"         
+      disable_login_form: false
+    analytics:
+      check_for_updates: false
+    security:
+      allow_embedding: true
+
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    replicas: 1
+    routePrefix: /         
+    externalUrl: "http://alertmanager.example.com"
+
+
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 50m
+        memory: 64Mi
+
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp3
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 2Gi
+
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      fsGroup: 2000
+
+    # Node affinity 
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: role
+                  operator: In
+                  values:
+                    - java-worker 
+  service:
+    type: ClusterIP
+    port: 9093
+
+
+  config:
+    global:
+      resolve_timeout: 5m
+      slack_api_url: "https://hooks.slack.com/services/your/slack/webhook/url"
+    inhibit_rules:
+      - source_matchers:
+          - severity = critical
+        target_matchers:
+          - severity = warning
+        equal: ["alertname", "namespace"]
+    route:
+      group_by: ["namespace", "alertname"]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      receiver: "slack-default"
+      routes:
+        - receiver: "slack-critical"
+          matchers:
+            - severity = critical
+          continue: false
+    receivers:
+      - name: "slack-default"
+        slack_configs:
+          - channel: "#all-prometheus"
+            send_resolved: true
+            title: '{{ template "slack.default.title" . }}'
+            text: >-
+              {{ range .Alerts }}
+              *Alert:* {{ .Annotations.summary }}
+              *Severity:* {{ .Labels.severity }}
+              *Description:* {{ .Annotations.description }}
+              {{ end }}
+      - name: "slack-critical"
+        slack_configs:
+          - channel: "#all-prometheus"
+            send_resolved: true
+            title: '[CRITICAL] {{ template "slack.default.title" . }}'
+            text: >-
+              {{ range .Alerts }}
+              *Alert:* {{ .Annotations.summary }}
+              *Severity:* {{ .Labels.severity }}
+              *Description:* {{ .Annotations.description }}
+              {{ end }}
+    templates:
+      - "/etc/alertmanager/config/*.tmpl"
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 50m
+      memory: 64Mi
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      cpu: 50m
+      memory: 32Mi
+
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+defaultRules:
+  create: true    
+  rules:
+    alertmanager: true
+    etcd: false
+    configReloaders: true
+    general: true
+    k8sContainerCpuUsageSecondsTotal: true
+    k8sContainerMemoryRss: true
+    k8sContainerResource: true
+    k8sPodOwner: true
+    kubeApiserverAvailability: true
+    kubeControllerManager: false
+    kubelet: true
+    kubeProxy: false
+    kubePrometheusGeneral: true
+    kubePrometheusNodeRecording: true
+    kubernetesApps: true
+    kubernetesResources: true
+    kubernetesStorage: true
+    kubernetesSystem: true
+    kubeSchedulerAlerting: false
+    kubeStateMetrics: true
+    network: true
+    node: true
+    nodeExporterAlerting: true
+    nodeExporterRecording: true
+    prometheus: true
+    prometheusOperator: true
+    windows: false
+  

@@ -118,7 +118,7 @@ sleep 30
 aws eks create-addon \
   --cluster-name eks-java \
   --addon-name aws-ebs-csi-driver \
-  --service-account-role-arn arn:aws:iam::841162698385:role/eksctl-eks-java-addon-iamserviceaccount-kube--Role1-ZoAMTOPeUNeO \
+  --service-account-role-arn arn:aws:iam::<Account ID>:role/eksctl-eks-java-addon-iamserviceaccount-kube--Role1-ZoAMTOPeUNeO \
   --region us-east-1
 ```
 
@@ -151,7 +151,7 @@ eksctl create iamserviceaccount \
   --cluster eks-java \
   --namespace kube-system \
   --name aws-load-balancer-controller \
-  --attach-policy-arn arn:aws:iam::841162698385:policy/AWSLoadBalancerControllerIAMPolicy \
+  --attach-policy-arn arn:aws:iam::<Account ID>:policy/AWSLoadBalancerControllerIAMPolicy \
   --approve
 ```
 
@@ -172,7 +172,7 @@ The downloaded IAM policy (v2.7.1) was missing the `ec2:DescribeRouteTables` per
 ```bash
 # Create a new version of the policy with the missing permission added
 aws iam create-policy-version \
-  --policy-arn arn:aws:iam::841162698385:policy/AWSLoadBalancerControllerIAMPolicy \
+  --policy-arn arn:aws:iam::<Account ID>:policy/AWSLoadBalancerControllerIAMPolicy \
   --policy-document file://iam-policy-v3.json \
   --set-as-default
 ```
@@ -208,7 +208,7 @@ metadata:
   name: aws-load-balancer-controller
   namespace: kube-system
   annotations:
-    eks.amazonaws.com/role-arn: "arn:aws:iam::841162698385:role/eksctl-eks-java-addon-iamserviceaccount-kube--Role1-O3e6dBTqsx66"
+    eks.amazonaws.com/role-arn: "arn:aws:iam::<Account ID>:role/eksctl-eks-java-addon-iamserviceaccount-kube--Role1-O3e6dBTqsx66"
 ```
 
 **Lesson:** If you manage ServiceAccounts in manifests that are also managed by `eksctl`, ensure the IRSA annotation is preserved. Otherwise, each `kubectl apply` overwrites it.

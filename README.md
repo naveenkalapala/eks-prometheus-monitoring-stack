@@ -52,6 +52,7 @@ End-to-end deployment of a Java application on Amazon EKS with a production-grad
 | Instance Type | t3.medium (17 pods/node, 4GB RAM) |
 | Helm Chart | kube-prometheus-stack (latest) |
 | ALB Controller | AWS Load Balancer Controller v2.7+ |
+| KEDA | Kubernetes Event-Driven Autoscaling (latest) |
 | Storage | gp3 (encrypted, WaitForFirstConsumer) |
 | Java App | Spring Boot with Micrometer/Actuator |
 | Alerting | Slack Channel / Webhook |
@@ -63,15 +64,20 @@ End-to-end deployment of a Java application on Amazon EKS with a production-grad
 
 ```
 Monitoring/
-├── README.md                      # This file
-├── eksctl-cluster.yaml            # EKS cluster definition (eksctl)
-├── deployment.yaml                # Namespace + Java app Deployment + Service
-├── ingress.yaml                   # ALB ServiceAccount+gp3 StorageClass+Ingress
-├── kube-prometheus-values.yaml    # Helm values for kube-prometheus-stack
-├── service-monitor.yaml           # ServiceMonitor + PrometheusRule (5 alerts)
-├── grafana-secrets.yaml           # Grafana admin secret template
-├── deploy.sh                      # Automated deployment script (end-to-end)
-└── troubleshooting.md             # 15+ documented issues with fixes
+├── README.md                          # This file
+├── troubleshooting.md                 # 15+ documented issues with fixes
+├── cluster/
+│   └── eksctl-cluster.yaml            # EKS cluster definition (eksctl)
+├── k8s/
+│   ├── deployment.yaml               # Namespace + Java app Deployment + Service
+│   ├── ingress.yaml                  # ALB ServiceAccount+gp3 StorageClass+Ingress
+│   ├── grafana-secrets.yaml          # Grafana admin secret template
+│   ├── service-monitor.yaml          # ServiceMonitor + PrometheusRule (5 alerts)
+│   └── keda-scaledobject.yaml        # KEDA ScaledObject (Prometheus-driven autoscaling)
+├── helm/
+│   └── kube-prometheus-values.yaml   # Helm values for kube-prometheus-stack
+└── scripts/
+    └── deploy.sh                     # Automated deployment script (end-to-end)
 ```
 
 ---
@@ -91,8 +97,8 @@ Monitoring/
 
 ```bash
 cd Monitoring/
-chmod +x deploy.sh
-./deploy.sh
+chmod +x scripts/deploy.sh
+./scripts/deploy.sh
 ```
 
 The script automates the entire process from cluster creation to live endpoints.
@@ -103,10 +109,10 @@ The script automates the entire process from cluster creation to live endpoints.
 
 ### Step 1: Create EKS Cluster
 
-Update `eksctl-cluster.yaml` with your VPC/subnet IDs, then:
+Update `cluster/eksctl-cluster.yaml` with your VPC/subnet IDs, then:
 
 ```bash
-eksctl create cluster -f eksctl-cluster.yaml
+eksctl create cluster -f cluster/eksctl-cluster.yaml
 aws eks update-kubeconfig --name eks-java --region us-east-1
 ```
 
@@ -131,12 +137,12 @@ aws iam attach-role-policy \
   --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/AWSLoadBalancerControllerIAMPolicy
 ```
 
-### Step 3: Apply Infrastructure (ingress.yaml)
+### Step 3: Apply Infrastructure (k8s/ingress.yaml)
 
-Update placeholders in `ingress.yaml` (role ARN, subnet IDs, certificate ARN, security group), then:
+Update placeholders in `k8s/ingress.yaml` (role ARN, subnet IDs, certificate ARN, security group), then:
 
 ```bash
-kubectl apply -f ingress.yaml
+kubectl apply -f k8s/ingress.yaml
 ```
 
 This creates:
@@ -165,7 +171,7 @@ helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
 ### Step 5: Deploy Java Application
 
 ```bash
-kubectl apply -f deployment.yaml
+kubectl apply -f k8s/deployment.yaml
 kubectl rollout status deployment/java-example -n java
 ```
 
@@ -184,7 +190,7 @@ helm repo add prometheus-community https://prometheus-community.github.io/helm-c
 helm repo update prometheus-community
 
 helm install prometheus prometheus-community/kube-prometheus-stack \
-  -f kube-prometheus-values.yaml \
+  -f helm/kube-prometheus-values.yaml \
   -n java \
   --timeout 10m \
   --wait
@@ -193,7 +199,7 @@ helm install prometheus prometheus-community/kube-prometheus-stack \
 ### Step 8: Apply ServiceMonitor & Alerts
 
 ```bash
-kubectl apply -f service-monitor.yaml
+kubectl apply -f k8s/service-monitor.yaml
 ```
 
 ### Step 9: Configure DNS
@@ -236,6 +242,17 @@ alertmanager.example.com → <ALB_DNS>
 - RollingUpdate strategy for Java app (maxSurge: 1, maxUnavailable: 0)
 - Liveness/readiness probes on Java app
 
+### Autoscaling (KEDA)
+
+KEDA (Kubernetes Event-Driven Autoscaling) is used instead of traditional HPA for event-driven, Prometheus-metrics-based autoscaling of the Java application:
+
+- **Prometheus trigger**: Scales based on HTTP request rate (`http_server_requests_seconds_count`) — threshold: 50 req/s per replica
+- **CPU trigger**: Scales when CPU utilization exceeds 70%
+- **Memory trigger**: Scales when memory utilization exceeds 75%
+- **Scale-to-zero**: Supported (set `idleReplicaCount: 0` or `1` depending on requirements)
+- **Scale range**: 1–10 replicas (active), with fallback to 2 replicas if metrics are unavailable
+- **Cooldown**: 120s before scaling down; scale-down stabilization window of 300s
+
 ### Node Affinity
 
 All monitoring components are pinned to nodes with label `role: java-worker` using `requiredDuringSchedulingIgnoredDuringExecution`.
@@ -258,14 +275,14 @@ All monitoring components are pinned to nodes with label `role: java-worker` usi
 
 | File | Placeholder | Replace With |
 |------|------------|--------------|
-| `eksctl-cluster.yaml` | `vpc-xxxxx`, `subnet-xxxxx` | Your VPC and subnet IDs |
-| `ingress.yaml` | `arn:aws:iam::account-id:role/role-name` | ALB controller IRSA role ARN |
-| `ingress.yaml` | `subnet-xxxxx,subnet-yyyyy` | Your public subnet IDs |
-| `ingress.yaml` | `arn:aws:acm:...:certificate/cert-id` | Your ACM certificate ARN |
-| `ingress.yaml` | `sg-xxxxx` | Your ALB security group ID |
-| `ingress.yaml` | `*.example.com` hosts | Your actual FQDNs |
-| `kube-prometheus-values.yaml` | `example.com` URLs | Your actual domain |
-| `kube-prometheus-values.yaml` | Slack webhook URL | Your Slack webhook |
+| `cluster/eksctl-cluster.yaml` | `vpc-xxxxx`, `subnet-xxxxx` | Your VPC and subnet IDs |
+| `k8s/ingress.yaml` | `arn:aws:iam::account-id:role/role-name` | ALB controller IRSA role ARN |
+| `k8s/ingress.yaml` | `subnet-xxxxx,subnet-yyyyy` | Your public subnet IDs |
+| `k8s/ingress.yaml` | `arn:aws:acm:...:certificate/cert-id` | Your ACM certificate ARN |
+| `k8s/ingress.yaml` | `sg-xxxxx` | Your ALB security group ID |
+| `k8s/ingress.yaml` | `*.example.com` hosts | Your actual FQDNs |
+| `helm/kube-prometheus-values.yaml` | `example.com` URLs | Your actual domain |
+| `helm/kube-prometheus-values.yaml` | Slack webhook URL | Your Slack webhook |
 
 ---
 
@@ -309,9 +326,9 @@ helm uninstall prometheus -n java
 helm uninstall aws-load-balancer-controller -n kube-system
 
 # Delete Kubernetes resources
-kubectl delete -f service-monitor.yaml
-kubectl delete -f ingress.yaml
-kubectl delete -f deployment.yaml
+kubectl delete -f k8s/service-monitor.yaml
+kubectl delete -f k8s/ingress.yaml
+kubectl delete -f k8s/deployment.yaml
 
 # Delete cluster (removes all AWS resources)
 eksctl delete cluster --name eks-java --region us-east-1

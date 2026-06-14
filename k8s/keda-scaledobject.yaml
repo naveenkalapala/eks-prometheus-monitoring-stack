@@ -1,0 +1,68 @@
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: prometheus-trigger-auth
+  namespace: java
+spec:
+  podIdentity:
+    provider: none
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: java-app-scaledobject
+  namespace: java
+  labels:
+    app: java-example
+spec:
+  scaleTargetRef:
+    name: java-example
+  pollingInterval: 30                    # How often KEDA checks metrics (seconds)
+  cooldownPeriod: 120                    # Wait before scaling down after last trigger (seconds)
+  idleReplicaCount: 0                    # Scale to zero when idle (set to 1 if you don't want scale-to-zero)
+  minReplicaCount: 1                     # Minimum replicas when active
+  maxReplicaCount: 10                    # Maximum replicas
+  fallback:
+    failureThreshold: 3                  # Number of failures before using fallback
+    replicas: 2  
+    behavior:                       # Behavior when fallback is active (e.g., "ScaleToReplicas", "ScaleToZero")
+      type: ScaleToReplicas
+      value: "2"                       # Number of replicas to scale to when fallback is active
+  advanced:
+    restoreToOriginalReplicaCount: false
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+            - type: Percent
+              value: 25
+              periodSeconds: 60
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Percent
+              value: 100
+              periodSeconds: 15
+            - type: Pods
+              value: 4
+              periodSeconds: 15
+          selectPolicy: Max
+  triggers:
+    # Scale based on HTTP request rate per second from Prometheus
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-prometheus.java.svc.cluster.local:9090
+        query: sum(rate(http_server_requests_seconds_count{namespace="java", job="java-service"}[2m]))
+        threshold: "50"                  # Scale up when requests/sec exceeds 50 per replica
+        activationThreshold: "5"         # Activate scaling (from zero) when requests/sec > 5
+    # Scale based on CPU utilization as a secondary trigger
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: "70"                      # Scale when CPU exceeds 70%
+    # Scale based on memory utilization
+    - type: memory
+      metricType: Utilization
+      metadata:
+        value: "75"                      # Scale when memory exceeds 75%

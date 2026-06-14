@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CLUSTER_NAME="eks-java"
 REGION="us-east-1"
 NAMESPACE="java"
@@ -39,7 +40,7 @@ create_cluster() {
   if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
     warn "Cluster '${CLUSTER_NAME}' already exists. Skipping creation."
   else
-    eksctl create cluster -f "${SCRIPT_DIR}/eksctl-cluster.yaml"
+    eksctl create cluster -f "${ROOT_DIR}/cluster/eksctl-cluster.yaml"
     log "Cluster created successfully."
   fi
 
@@ -118,7 +119,7 @@ EOF
 
 apply_ingress() {
   log "Applying ingress.yaml (ServiceAccount, StorageClass, Ingress)..."
-  kubectl apply -f "${SCRIPT_DIR}/ingress.yaml"
+  kubectl apply -f "${ROOT_DIR}/k8s/ingress.yaml"
 
   # Annotate ServiceAccount with actual role ARN (overrides placeholder)
   ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/AmazonEKSLoadBalancerControllerRole"
@@ -178,7 +179,7 @@ install_alb_controller() {
 
 deploy_java_app() {
   log "Deploying Java application..."
-  kubectl apply -f "${SCRIPT_DIR}/deployment.yaml"
+  kubectl apply -f "${ROOT_DIR}/k8s/deployment.yaml"
   kubectl rollout status deployment/java-example -n "$NAMESPACE" --timeout=120s
   log "Java application deployed."
 }
@@ -189,7 +190,7 @@ deploy_java_app() {
 create_grafana_secret() {
   if ! kubectl get secret grafana-admin-secret -n "$NAMESPACE" >/dev/null 2>&1; then
     log "Applying Grafana admin secret from grafana-secrets.yaml..."
-    kubectl apply -f "${SCRIPT_DIR}/grafana-secrets.yaml"
+    kubectl apply -f "${ROOT_DIR}/k8s/grafana-secrets.yaml"
   else
     warn "Grafana admin secret already exists."
   fi
@@ -207,13 +208,13 @@ install_monitoring() {
   if helm status prometheus -n "$NAMESPACE" >/dev/null 2>&1; then
     warn "Already installed. Upgrading..."
     helm upgrade prometheus prometheus-community/kube-prometheus-stack \
-      -f "${SCRIPT_DIR}/kube-prometheus-values.yaml" \
+      -f "${ROOT_DIR}/helm/kube-prometheus-values.yaml" \
       -n "$NAMESPACE" \
       --timeout 10m \
       --wait
   else
     helm install prometheus prometheus-community/kube-prometheus-stack \
-      -f "${SCRIPT_DIR}/kube-prometheus-values.yaml" \
+      -f "${ROOT_DIR}/helm/kube-prometheus-values.yaml" \
       -n "$NAMESPACE" \
       --timeout 10m \
       --wait
@@ -223,16 +224,64 @@ install_monitoring() {
 }
 
 
-# Step 8: Apply ServiceMonitor & PrometheusRules
+# Step 8: Install KEDA (Kubernetes Event-Driven Autoscaling)
+
+install_keda() {
+  log "Installing KEDA..."
+
+  helm repo add kedacore https://kedacore.github.io/charts 2>/dev/null || true
+  helm repo update kedacore
+
+  if helm status keda -n keda >/dev/null 2>&1; then
+    warn "KEDA already installed. Upgrading..."
+    helm upgrade keda kedacore/keda \
+      -n keda \
+      --set resources.operator.requests.cpu=10m \
+      --set resources.operator.requests.memory=64Mi \
+      --set resources.operator.limits.cpu=100m \
+      --set resources.operator.limits.memory=128Mi \
+      --set resources.metricServer.requests.cpu=10m \
+      --set resources.metricServer.requests.memory=64Mi \
+      --set resources.metricServer.limits.cpu=100m \
+      --set resources.metricServer.limits.memory=128Mi
+  else
+    kubectl create namespace keda 2>/dev/null || true
+    helm install keda kedacore/keda \
+      -n keda \
+      --set resources.operator.requests.cpu=10m \
+      --set resources.operator.requests.memory=64Mi \
+      --set resources.operator.limits.cpu=100m \
+      --set resources.operator.limits.memory=128Mi \
+      --set resources.metricServer.requests.cpu=10m \
+      --set resources.metricServer.requests.memory=64Mi \
+      --set resources.metricServer.limits.cpu=100m \
+      --set resources.metricServer.limits.memory=128Mi
+  fi
+
+  kubectl rollout status deployment/keda-operator -n keda --timeout=120s
+  log "KEDA installed."
+}
+
+
+# Step 9: Apply ServiceMonitor & PrometheusRules
 
 apply_monitors() {
   log "Applying ServiceMonitor and PrometheusRules..."
-  kubectl apply -f "${SCRIPT_DIR}/service-monitor.yaml"
+  kubectl apply -f "${ROOT_DIR}/k8s/service-monitor.yaml"
   log "ServiceMonitor and PrometheusRules applied."
 }
 
 
-# Step 9: Verify Deployment
+# Step 10: Apply KEDA ScaledObject
+
+apply_keda_scaledobject() {
+  log "Applying KEDA ScaledObject for Java app autoscaling..."
+  kubectl apply -f "${ROOT_DIR}/k8s/keda-scaledobject.yaml"
+  log "KEDA ScaledObject applied."
+}
+
+
+# Step 11: Verify Deployment
 
 verify() {
   echo ""
@@ -248,6 +297,9 @@ verify() {
   echo ""
   log "Services:"
   kubectl get svc -n "$NAMESPACE"
+  echo ""
+  log "KEDA ScaledObjects:"
+  kubectl get scaledobjects -n "$NAMESPACE"
   echo ""
   log "Ingress:"
   kubectl get ingress -n "$NAMESPACE"
@@ -301,8 +353,10 @@ main() {
   log "  5. Deploy Java application"
   log "  6. Create Grafana admin secret"
   log "  7. Install kube-prometheus-stack (Helm)"
-  log "  8. Apply ServiceMonitor & PrometheusRules"
-  log "  9. Verify & print endpoints"
+  log "  8. Install KEDA (Helm)"
+  log "  9. Apply ServiceMonitor & PrometheusRules"
+  log "  10. Apply KEDA ScaledObject"
+  log "  11. Verify & print endpoints"
   echo ""
 
   preflight
@@ -313,7 +367,9 @@ main() {
   deploy_java_app
   create_grafana_secret
   install_monitoring
+  install_keda
   apply_monitors
+  apply_keda_scaledobject
   verify
 
   log "Deployment complete! Project is live."
